@@ -1,35 +1,12 @@
 "use strict";
-/* ═══════════════════════════════════════════════════════════════════════
-   悬浮选项栏（通用插件）
-
-   解决的问题：AI 每层楼都会输出 <next_prompt> 选项，正则把它渲染成一块界面。
-   楼层越堆越多，旧选项全部留在页面上，页面被重复内容撑长。
-   本脚本只把「最近一条带选项的 AI 回复」搬进一个固定悬浮窗，其余楼层里的
-   同款界面块全部隐藏；楼层正文里那份也不再显示。
-
-   实现方式：不改正则、不改消息。
-   - 悬浮窗内容由脚本从消息原文解析后自行渲染，不依赖楼层 iframe；
-   - 楼层里那份是酒馆助手渲染的 iframe，按内容特征识别后 display:none。
-
-   配置区在下方「配置」处，换卡或换正则只改那里。
-   ═══════════════════════════════════════════════════════════════════════ */
-/* ═══════════════ 配置（改这里） ═══════════════ */
-/* 整体包在 IIFE 里：酒馆助手重新加载脚本时会在同一作用域再执行一次，
-   顶层 const 会撞名报错，包起来后每次都是新作用域。 */
 (() => {
     const 配置 = {
-        /** 面板标题 */
         标题: '剧情推演分支',
-        /** 默认宽度（窄屏会自动收窄） */
         宽度: 368,
-        /** 默认位置：距右边、距顶部 */
         默认位置: { right: 24, top: 96 },
-        /** 脚本变量里记住位置/收起状态的键 */
         存储键: '悬浮选项栏状态',
-        /** 松手后悬浮球吸附到最近一边，露在屏内的比例。
-         *  0.5 = 半个球露在屏外，呈半圆；0 = 贴边但完整可见 */
         球露出比例: 0.5,
-        /** 来源列表：目前只有剧情分支选项栏。以后加第二种块，在这里追加一项即可 */
+        吸附距离: 48,
         来源: [
             {
                 标签: '剧情分支',
@@ -38,28 +15,41 @@
             },
         ],
     };
-    /* ═══════════════ 常量 ═══════════════ */
     const 根标识 = 'moyu-fc';
     const 隐藏标记 = 'data-moyu-fc-hidden';
-    /** 判定选项配色用的关键词（沿用原正则的规则） */
+    const 实例标记 = '__moyuFcGeneration';
+    const 本代次 = (() => {
+        try {
+            const 上 = Number(window[实例标记] || 0);
+            window[实例标记] = 上 + 1;
+            return 上 + 1;
+        }
+        catch {
+            return 1;
+        }
+    })();
+    function 仍是当前实例() {
+        try {
+            return Number(window[实例标记] || 0) === 本代次;
+        }
+        catch {
+            return true;
+        }
+    }
     const 粉色关键词 = [
         '色情', '腹肌', '内裤', '巨物', '青筋', '硬度', '性', '肉棒',
         '潮吹', '验货', '骚', '抽插', '肉体', '高潮', '调教', '深喉',
         '阴茎', '勃起', '精液', '胸肌', '吻', '脱', '摸', '做爱',
     ];
-    /* ═══════════════ 环境 ═══════════════ */
-    /** 脚本跑在独立 iframe 里，界面要挂到酒馆父页面 */
     function 父文档() {
         try {
             if (parent && parent.document && parent.document.body)
                 return parent.document;
         }
         catch {
-            /* 跨域或未就绪时退回自身文档 */
         }
         return document;
     }
-    /** 视口尺寸必须取父页面，脚本 iframe 自己的 innerWidth 是错的 */
     function 视口宽() {
         const 文档 = 父文档();
         return 文档.defaultView?.innerWidth ?? 文档.documentElement.clientWidth ?? 1024;
@@ -68,17 +58,7 @@
         const 文档 = 父文档();
         return 文档.defaultView?.innerHeight ?? 文档.documentElement.clientHeight ?? 768;
     }
-    /** 基准位置：用户最后一次拖到的地方（内存）。视口变化时按它重摆，
-     *  不读脚本变量 —— 变量写入是异步的，resize 连发时读回来还是旧值。 */
     const 基准位置 = { 位置: null, 球位置: null };
-    /**
-     * 把元素拽回屏幕内（只改视觉，不写存储）。
-     * 保存下来的坐标是全局坐标：桌面拖到右下角，换手机打开时整个球会落在屏幕外，
-     * 表现就是「看不到悬浮球」。所以在恢复位置、转屏、软键盘弹出后都要重新夹一次。
-     *
-     * 不写存储是有意的：脚本变量跨设备共享，写回会用手机上的坐标覆盖桌面位置；
-     * 软键盘弹出时 innerHeight 变矮，写回后键盘一收起，球就永久上移了。
-     */
     function 屏内夹紧(元素) {
         if (!元素 || 元素.hidden)
             return;
@@ -96,9 +76,6 @@
         元素.style.right = 'auto';
         元素.style.bottom = 'auto';
     }
-    /** 按基准位置重新摆一次，再夹紧。
-     *  重摆是必须的：窄屏或键盘弹出时夹到的新位置写在 inline style 上，
-     *  视口恢复后不重摆就回不到原处。 */
     function 重摆并夹紧(位置键, 元素, 套默认) {
         if (!元素 || 元素.hidden)
             return;
@@ -110,29 +87,19 @@
             元素.style.bottom = 'auto';
         }
         else if (套默认) {
-            /* 没拖过的元素回到默认贴边位置，否则窄屏夹紧留下的 left/top 会永久粘住 */
             元素.style.removeProperty('left');
             元素.style.removeProperty('top');
             套默认();
         }
         屏内夹紧(元素);
     }
-    /**
-     * 按边吸住悬浮球。
-     * 球刻意允许一部分留在视口外：手机上看就是一个半圆贴在屏幕边。
-     * 所以球不能走通用的屏内夹紧，否则每次转屏/键盘都会把球推回屏内，半圆就没了。
-     * 竖直方向只夹紧、不吸附，用户松手的高度保留。
-     */
     function 吸附球(元素, 边, 指定上) {
         const 区域 = 元素.getBoundingClientRect();
         const 宽 = 区域.width || 元素.offsetWidth;
         const 高 = 区域.height || 元素.offsetHeight;
         if (!宽 || !高)
             return null;
-        /* 比例限死有效区间：0 会整个藏起来，1 就不是半圆了 */
         const 露出 = Math.min(0.9, Math.max(0.1, 配置.球露出比例));
-        /* 指定高度也要夹：存的 top 来自转屏前的视口，横屏只有 390 高时
-           直接套用会把球放到屏幕下沿之外 */
         const 上 = Math.min(
             Math.max(0, 指定上 != null ? 指定上 : 区域.top),
             Math.max(0, 视口高() - 高),
@@ -142,10 +109,26 @@
         元素.style.top = `${Math.round(上)}px`;
         元素.style.right = 'auto';
         元素.style.bottom = 'auto';
+        delete 元素.dataset.free;
         元素.dataset.edge = 边;
         return { left: Math.round(左), top: Math.round(上), 边 };
     }
-    /** 松手吸附时带一小段过渡，避免球瞬移到边上 */
+    function 停在原地(元素, 指定左, 指定上) {
+        const 区域 = 元素.getBoundingClientRect();
+        const 宽 = 区域.width || 元素.offsetWidth;
+        const 高 = 区域.height || 元素.offsetHeight;
+        if (!宽 || !高)
+            return null;
+        const 左 = Math.min(Math.max(0, 指定左 != null ? 指定左 : 区域.left), Math.max(0, 视口宽() - 宽));
+        const 上 = Math.min(Math.max(0, 指定上 != null ? 指定上 : 区域.top), Math.max(0, 视口高() - 高));
+        元素.style.left = `${Math.round(左)}px`;
+        元素.style.top = `${Math.round(上)}px`;
+        元素.style.right = 'auto';
+        元素.style.bottom = 'auto';
+        delete 元素.dataset.edge;
+        元素.dataset.free = '1';
+        return { left: Math.round(左), top: Math.round(上), 边: null, 自由: true };
+    }
     function 平滑吸附(元素, 边, 指定上) {
         const 原过渡 = 元素.style.transition;
         元素.style.transition = 'left 0.24s cubic-bezier(0.22, 0.61, 0.36, 1), top 0.24s cubic-bezier(0.22, 0.61, 0.36, 1)';
@@ -155,8 +138,6 @@
         }, 260);
         return 结果;
     }
-    /** 球的摆放统一走这里：存过边就按边吸回，没存过默认贴右边缘。
-     *  球隐藏时量不到尺寸，交给显示后的那一帧再摆。 */
     function 摆放球() {
         if (!球体 || 球体.hidden)
             return;
@@ -165,17 +146,30 @@
             吸附球(球体, 存.边, 存.top);
             return;
         }
+        if (存 && 存.自由) {
+            停在原地(球体, 存.left, 存.top);
+            return;
+        }
         if (存) {
-            /* 旧版本存的位置没有边：按它离哪边近就吸哪边，升级后立刻是半圆 */
             const 边 = 存.left + 球体.offsetWidth / 2 < 视口宽() / 2 ? 'left' : 'right';
             吸附球(球体, 边, 存.top);
+            return;
+        }
+        const 现场边 = 球体.dataset.edge;
+        const 现场上 = 球体.getBoundingClientRect().top;
+        if (现场边 === 'left' || 现场边 === 'right') {
+            吸附球(球体, 现场边, 现场上);
+            return;
+        }
+        if (球体.dataset.free === '1') {
+            停在原地(球体, 球体.getBoundingClientRect().left, 现场上);
             return;
         }
         const 高 = 球体.getBoundingClientRect().height || 44;
         吸附球(球体, 'right', Math.max(0, 视口高() - 120 - 高));
     }
     function 夹紧当前可见() {
-        if (!面板根)
+        if (!面板根 || !仍是当前实例())
             return;
         重摆并夹紧('位置', 面板体, () => {
             面板体.style.right = `${配置.默认位置.right}px`;
@@ -183,7 +177,6 @@
         });
         摆放球();
     }
-    /** 等布局完成再量尺寸；同步量会拿到 0 宽高，夹紧会失效 */
     function 请求动画帧夹紧() {
         const 视窗 = 父文档().defaultView;
         if (视窗 && typeof 视窗.requestAnimationFrame === 'function')
@@ -210,8 +203,6 @@
             console.log('[悬浮选项栏]', 消息);
         }
     }
-    /* ═══════════════ 选项解析（沿用原正则的规则） ═══════════════ */
-    /** 去掉思维链残留：只保留最后一个 </think> 之后的内容 */
     function 清理思维链(文本) {
         if (!文本)
             return '';
@@ -239,11 +230,6 @@
         const 小写 = 内容.toLowerCase();
         return 粉色关键词.some(词 => 小写.includes(词)) ? 'pink' : 'gold';
     }
-    /* ═══════════════ 读取数据 ═══════════════ */
-    /**
-     * 只看最新一条 AI 回复。
-     * 它带了块就更新；没带就返回空，由调用方保持上一份，不回退到更早的楼层。
-     */
     function 读取最新层数据() {
         const 结果 = [];
         try {
@@ -273,7 +259,6 @@
         }
         return 结果;
     }
-    /* ═══════════════ 楼层里的块：识别与隐藏 ═══════════════ */
     function 元素含特征(元素, 特征) {
         if (元素.tagName === 'IFRAME') {
             const 框 = 元素;
@@ -282,7 +267,6 @@
                     return true;
             }
             catch {
-                /* 读不到 srcdoc 继续看内部文档 */
             }
             try {
                 const 内文 = 框.contentDocument;
@@ -290,7 +274,6 @@
                     return true;
             }
             catch {
-                /* 跨域读不到就放弃这一项 */
             }
             return false;
         }
@@ -301,7 +284,6 @@
             return false;
         }
     }
-    /** 把一个块收起来：只隐藏到不牵连正文的那一层 */
     function 收起块(块, 楼层文本) {
         let 目标 = 块;
         let 上级 = 目标.parentElement;
@@ -322,7 +304,6 @@
         目标.style.setProperty('display', 'none', 'important');
         目标.setAttribute(隐藏标记, '1');
     }
-    /** 扫一遍所有楼层，把同款块全部藏掉（最新那层也藏，因为它已经搬进悬浮窗） */
     function 隐藏楼层块() {
         const 文档 = 父文档();
         let 识别到 = 0;
@@ -340,8 +321,6 @@
         });
         if (识别到 > 0)
             return;
-        /* 一个都没按内容认出来（可能是读不到 iframe 内容）：按消息原文兜底，
-           只藏该楼层 .mes_text 里的最后一个界面块，尽量不牵连同层其他块 */
         try {
             const 末楼 = typeof getLastMessageId === 'function' ? getLastMessageId() : 0;
             const 消息表 = new Map();
@@ -371,7 +350,6 @@
             块.removeAttribute(隐藏标记);
         });
     }
-    /* ═══════════════ 界面 ═══════════════ */
     let 面板根 = null;
     let 面板体 = null;
     let 列表区 = null;
@@ -394,6 +372,7 @@
                             边: 球位置.边 === 'left' || 球位置.边 === 'right' ? 球位置.边 : undefined,
                             left: typeof 球位置.left === 'number' ? 球位置.left : 0,
                             top: typeof 球位置.top === 'number' ? 球位置.top : 0,
+                            自由: !!球位置.自由,
                         }
                         : null,
                     收起: !!值.收起,
@@ -401,7 +380,6 @@
             }
         }
         catch {
-            /* 读不到就用默认 */
         }
         return { 位置: null, 球位置: null, 收起: false };
     }
@@ -459,8 +437,7 @@
   position: fixed;
   z-index: 6000;
   pointer-events: auto;
-  /* border-box 必须加：否则 368 是内容宽，加边框后实际 370，
-     窄屏用 calc(100vw - Npx) 时会顶出屏幕左边 */
+  
   box-sizing: border-box;
   width: min(${配置.宽度}px, calc(100vw - 32px));
   max-height: min(70vh, 560px);
@@ -662,17 +639,16 @@
 }
 .${根标识}-ball[hidden] { display: none; }
 .${根标识}-ball:hover { border-color: var(--fc-gold); }
-/* 吸到边上时有一半在屏外，图标往屏内挪，不然会被裁掉半边 */
+
 .${根标识}-ball[data-edge='right'] svg { transform: translateX(-12px); }
 .${根标识}-ball[data-edge='left'] svg { transform: translateX(12px); }
-/* 拖动中要跟手，不能有过渡；吸附的过渡只在松手那一瞬临时加 */
+
 .${根标识}-ball[data-dragging='1'] { transition: none !important; }
 @media (max-width: 720px) {
-  /* 宽度沿用基础规则 calc(100vw - 32px)：默认 right:24 下还有 8px 左边距，
-     不会再出现「368 宽 + 24 右距 > 390 视口」把面板顶出左边的情况 */
+  
   .${根标识}-panel { max-height: 58vh; max-height: 58dvh; }
 }
-/* 触屏没有 hover，只能看到常驻按钮，加大点击区 */
+
 @media (hover: none), (pointer: coarse) {
   .${根标识}-min { width: 32px; height: 32px; border-radius: 9px; }
   .${根标识}-ball { width: 48px; height: 48px; }
@@ -714,7 +690,6 @@
         标签区 = 根.querySelector(`.${根标识}-tabs`);
         球体 = 根.querySelector(`.${根标识}-ball`);
         const 状态 = 读状态();
-        /* 记住用户上次拖到哪，视口变化时按它重摆 */
         基准位置.位置 = 状态.位置;
         基准位置.球位置 = 状态.球位置;
         if (状态.位置) {
@@ -727,9 +702,12 @@
         }
         if (状态.球位置) {
             if (状态.球位置.边 === 'left' || 状态.球位置.边 === 'right') {
-                /* 吸附过：left 是按当时视口算的负值，转屏后不能直接用，
-                   等量到球尺寸后由 摆放球 重算 */
                 球体.dataset.edge = 状态.球位置.边;
+                球体.style.top = `${状态.球位置.top}px`;
+            }
+            else if (状态.球位置.自由) {
+                球体.dataset.free = '1';
+                球体.style.left = `${状态.球位置.left}px`;
                 球体.style.top = `${状态.球位置.top}px`;
             }
             else {
@@ -743,21 +721,17 @@
         }
         面板体.hidden = 状态.收起;
         球体.hidden = !状态.收起;
-        /* 保存的坐标可能来自更大的屏幕（桌面拖过 → 手机打开），先拉回视口内 */
         请求动画帧夹紧();
         根.querySelector(`.${根标识}-min`)?.addEventListener('pointerdown', 事件 => {
-            /* 别让按收起按钮时被头部拖动逻辑接管 */
             事件.stopPropagation();
         });
         根.querySelector(`.${根标识}-min`)?.addEventListener('click', () => {
             面板体.hidden = true;
             球体.hidden = false;
             存状态({ 收起: true });
-            /* 球可能还带着上一台设备的旧坐标，显示出来再夹一次 */
             请求动画帧夹紧();
         });
         球体.addEventListener('click', () => {
-            /* 刚拖完的那一下点击不算「展开」；只认 400ms 内的，避免标记一直挂着 */
             const 拖动时刻 = Number(球体.dataset.draggedAt || 0);
             if (拖动时刻 && Date.now() - 拖动时刻 < 400) {
                 delete 球体.dataset.draggedAt;
@@ -771,7 +745,6 @@
         绑定拖动(面板体.querySelector(`.${根标识}-head`), 面板体, '位置');
         绑定拖动(球体, 球体, '球位置');
     }
-    /** 按住拖动：面板拖头部，球拖自身；松手记住位置 */
     function 绑定拖动(把手, 目标, 位置键) {
         let 起点X = 0;
         let 起点Y = 0;
@@ -793,14 +766,12 @@
                 把手.setPointerCapture(事件.pointerId);
             }
             catch {
-                /* 部分环境不支持捕获 */
             }
         });
         把手.addEventListener('pointermove', 事件 => {
             if (!拖动中)
                 return;
             const 是球 = 位置键 === '球位置';
-            /* 球可以拖到只露出一半，所以下限允许负值；否则从半圆状态一拖就会先跳回屏内 */
             let 左下限 = 0;
             let 左上限 = Math.max(0, 视口宽() - 目标.offsetWidth);
             if (是球) {
@@ -815,8 +786,6 @@
             目标.style.right = 'auto';
             目标.style.bottom = 'auto';
             if (是球 && Math.abs(事件.clientX - 起点X) + Math.abs(事件.clientY - 起点Y) > 4) {
-                /* 记时间而不是布尔标记：手机上拖完常常不派发 click，
-                   布尔标记会一直挂着，把下一次正常点击吞掉 */
                 目标.dataset.draggedAt = String(Date.now());
             }
         });
@@ -827,12 +796,19 @@
             delete 目标.dataset.dragging;
             const 区域 = 目标.getBoundingClientRect();
             if (位置键 === '球位置') {
-                /* 松手吸附到更近的一边：球心偏左就贴左，偏右就贴右。
-                   竖直方向保留用户松手的高度，只夹回屏内。 */
-                const 边 = 区域.left + 区域.width / 2 < 视口宽() / 2 ? 'left' : 'right';
+                const 离左 = 区域.left;
+                const 离右 = 视口宽() - 区域.right;
+                const 边上 = Math.min(离左, 离右) <= 配置.吸附距离;
                 const 上 = Math.min(Math.max(0, 区域.top), Math.max(0, 视口高() - 区域.height));
-                const 位置 = 平滑吸附(目标, 边, 上);
-                基准位置[位置键] = 位置 ?? { left: Math.round(区域.left), top: Math.round(区域.top), 边 };
+                let 位置;
+                if (边上) {
+                    const 边 = 离左 <= 离右 ? 'left' : 'right';
+                    位置 = 平滑吸附(目标, 边, 上);
+                }
+                else {
+                    位置 = 停在原地(目标, 区域.left, 上);
+                }
+                基准位置[位置键] = 位置 ?? { left: Math.round(区域.left), top: Math.round(区域.top), 边: null };
                 存状态({ [位置键]: 基准位置[位置键] });
                 return;
             }
@@ -913,7 +889,6 @@
             列表区.appendChild(行);
         });
     }
-    /** Slash 里 | { } 会被当成管道和变量，先转义 */
     function 转义命令(文本) {
         return 文本.replace(/(\\+)?([|{}])/g, (_匹配, 斜杠, 字符) => {
             const 前缀 = 斜杠 || '';
@@ -941,7 +916,6 @@
             弹提示('填入失败', 'error');
         }
     }
-    /* ═══════════════ 主同步 ═══════════════ */
     let 上次指纹 = '';
     function 同步(强制 = false) {
         if (!面板根)
@@ -949,7 +923,6 @@
         更新主题();
         const 新数据 = 读取最新层数据();
         if (新数据.length) {
-            /* 没出现的来源沿用旧数据：最新层没带这块时保持上一份 */
             const 合并 = 配置.来源
                 .map(源 => 新数据.find(数据 => 数据.来源.标签 === 源.标签) ?? 当前数据们.find(数据 => 数据.来源.标签 === 源.标签))
                 .filter((数据) => !!数据);
@@ -968,19 +941,20 @@
             面板根.hidden = false;
         }
         else if (!当前数据们.length) {
-            /* 整局都没有块才隐藏；有旧数据时保持上一份，不清空 */
             面板根.hidden = true;
         }
         隐藏楼层块();
     }
-    /* ═══════════════ 事件 ═══════════════ */
     let 防抖定时 = null;
     function 排程同步(延迟 = 260) {
+        if (!仍是当前实例())
+            return;
         if (防抖定时 !== null)
             clearTimeout(防抖定时);
         防抖定时 = setTimeout(() => {
             防抖定时 = null;
-            同步();
+            if (仍是当前实例())
+                同步();
         }, 延迟);
     }
     function 绑定事件() {
@@ -1006,7 +980,6 @@
         加('generation_ended', () => 排程同步(500));
         加('generation_stopped', () => 排程同步(500));
         加('message_iframe_render_ended', () => 排程同步(320));
-        /* iframe 渲染是异步的，事件可能早于块出现；MutationObserver 兜底 */
         const 文档 = 父文档();
         const 监听 = new MutationObserver(() => 排程同步(400));
         监听.observe(文档.body, { childList: true, subtree: true });
@@ -1014,7 +987,6 @@
         const 主题监听 = new MutationObserver(() => 更新主题());
         主题监听.observe(文档.body, { attributes: true, attributeFilter: ['class'] });
         window.__moyuFcThemeObserver = 主题监听;
-        /* 手机转屏、地址栏收起、软键盘弹出都会改视口；夹紧不然球会留在屏外 */
         const 视窗 = 文档.defaultView;
         if (视窗) {
             const 尺寸变化 = () => 请求动画帧夹紧();
@@ -1030,7 +1002,6 @@
             window.__moyuFcThemeObserver?.disconnect();
         }
         catch {
-            /* 忽略 */
         }
         try {
             const 视窗 = 父文档().defaultView;
@@ -1040,7 +1011,6 @@
             }
         }
         catch {
-            /* 忽略 */
         }
         if (防抖定时 !== null)
             clearTimeout(防抖定时);
@@ -1050,7 +1020,6 @@
         文档.getElementById(`${根标识}-style`)?.remove();
         面板根 = null;
     }
-    /* ═══════════════ 启动 ═══════════════ */
     function 等待酒馆就绪(回调) {
         let 次数 = 0;
         const 检查 = () => {
@@ -1065,13 +1034,14 @@
     }
     $(() => {
         等待酒馆就绪(() => {
+            if (!仍是当前实例())
+                return;
             try {
                 建界面();
                 绑定事件();
                 同步(true);
-                /* 首次渲染常常晚于脚本加载，补两轮 */
-                setTimeout(() => 同步(), 800);
-                setTimeout(() => 同步(), 2000);
+                setTimeout(() => { if (仍是当前实例()) 同步(); }, 800);
+                setTimeout(() => { if (仍是当前实例()) 同步(); }, 2000);
                 console.log('[悬浮选项栏] 已启动');
             }
             catch (错误) {
